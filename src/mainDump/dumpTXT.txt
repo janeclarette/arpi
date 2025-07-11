@@ -1,0 +1,95 @@
+# #include "CoinAcceptor.h"
+# #include "StepperMotor.h"
+# #include "RFIDReader.h"
+# #include "GameController.h"
+# #include "NetworkManager.h"
+# #include <ArduinoJson.h>
+
+# /* ----- Pin map ----- */
+# constexpr uint8_t COIN_PIN   = 16;
+# constexpr uint8_t RELAY_PIN  = 15;
+
+# constexpr uint8_t IN1 = 12, IN2 = 14, IN3 = 27, IN4 = 26;
+# constexpr uint8_t TRIG_PIN = 4, ECHO_PIN = 5;
+
+# constexpr uint8_t SS_PIN = 21;
+# constexpr uint8_t RST_PIN = 22;
+
+
+# // Network settings
+
+# const char* ssid     = "ZTE_2.4G_2HEH7z";
+# const char* password = "09212229746DavisFamily!";
+# const char* mqttHost = "192.168.1.23";
+# const int   mqttPort = 1883;
+# bool waitingForRFID = false;
+
+# /* Network manager */
+# NetworkManager net(ssid, password, mqttHost, mqttPort);
+
+# /* ----- Modules ----- */
+# CoinAcceptor  coin(COIN_PIN, RELAY_PIN);
+# StepperMotor  stepper(IN1, IN2, IN3, IN4);
+# RFIDReader    rfid(SS_PIN, RST_PIN);
+# GameController game(coin, stepper, rfid, TRIG_PIN, ECHO_PIN);
+
+# void setup() {
+#     Serial.begin(115200);
+#     net.begin();
+#     game.begin();
+# }
+
+# void loop() {
+#     net.loop();  // Keep MQTT connection alive
+
+#     static unsigned long lastSend = 0;
+
+#     // When waiting for RFID input, only check for it and pause other loop logic
+#     if (waitingForRFID) {
+#         if (rfid.poll()) {
+#             String user_uid = rfid.uid();
+#             Serial.print("📇 User UID: ");
+#             Serial.println(user_uid);
+
+#             // Send UID as JSON
+#             StaticJsonDocument<128> doc;
+#             doc["type"] = "SAVE";
+#             doc["uid"] = user_uid;
+
+#             String jsonString;
+#             serializeJson(doc, jsonString);
+#             net.send("esp32/test/esp1", jsonString.c_str());
+
+#             waitingForRFID = false;  // Done waiting, resume loop logic
+#         }
+
+#         return;  // Skip rest of loop while waiting for RFID
+#     }
+
+#     // Standard timed operations
+#     if (millis() - lastSend > 2000) {
+#         lastSend = millis();
+
+#         // Send greeting JSON
+#         StaticJsonDocument<128> initialMessage;
+#         initialMessage["type"] = "Greeting";
+#         String greet;
+#         serializeJson(initialMessage, greet);
+#         net.send("esp32/test/esp1", greet.c_str());
+
+#         // Read last received MQTT message
+#         String msg = NetworkManager::getStatusFromLastMessage();
+#         Serial.print("📥 Received from MQTT: ");
+#         Serial.println(msg);
+
+#         if (msg == "START_GAME") {
+#             Serial.println("🎮 Starting game from MQTT!");
+#             game.update();  // Run game logic
+#         } 
+        
+#         else if (msg == "RFID_UID") {
+#             Serial.println("🔒 Waiting for RFID scan...");
+#             waitingForRFID = true;  // Pause loop until RFID is scanned
+#         }
+#     }
+# }
