@@ -59,7 +59,7 @@ void NetworkManager::connectMQTT() {
         Serial.print("🔁 Connecting to MQTT... ");
         if (mqttClient.connect("ESP32Client")) {  // Make sure this is unique
             Serial.println("connected!");
-            if (mqttClient.subscribe("esp32/control/esp1")) {
+            if (mqttClient.subscribe("esp32/control")) {
                 Serial.println("✅ Subscribed to esp32/control");
             } else {
                 Serial.println("❌ Subscription failed");
