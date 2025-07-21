@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "beacon.h"
 
-#define RELAY_BEACON_PIN 0
+#define RELAY_BEACON_PIN 15
 
 void setupBeacon() {
   pinMode(RELAY_BEACON_PIN, OUTPUT);

@@ -5,7 +5,7 @@
 #define RELAY_NEON_PIN1 33
 #define RELAY_NEON_PIN2 32
 #define RELAY_NEON_PIN3 22
-#define RELAY_NEON_PIN4 26
+#define RELAY_NEON_PIN4 23
 #define RELAY_NEON_PIN5 2
 
 const uint8_t neonPins[] = {
@@ -52,4 +52,55 @@ void neonPattern2() {
     delay(150);
     digitalWrite(neonPins[i], HIGH);
   }
+}
+
+void neonPattern() {
+  Serial.println("Neon Pattern: Complex 5-second display");
+  unsigned long startTime = millis();
+  
+  // Run pattern for at least 5 seconds
+  while (millis() - startTime < 5000) {
+    // Wave pattern - lights turn on in sequence and stay on
+    for (size_t i = 0; i < neonCount; i++) {
+      digitalWrite(neonPins[i], LOW);
+      delay(100);
+    }
+    delay(200);
+    
+    // Turn all off briefly
+    for (size_t i = 0; i < neonCount; i++) {
+      digitalWrite(neonPins[i], HIGH);
+    }
+    delay(100);
+    
+    // Reverse wave - lights turn on from end to start
+    for (int i = neonCount - 1; i >= 0; i--) {
+      digitalWrite(neonPins[i], LOW);
+      delay(100);
+    }
+    delay(200);
+    
+    // Blink all together
+    for (size_t i = 0; i < neonCount; i++) {
+      digitalWrite(neonPins[i], LOW);
+    }
+    delay(300);
+    for (size_t i = 0; i < neonCount; i++) {
+      digitalWrite(neonPins[i], HIGH);
+    }
+    delay(300);
+  }
+  
+  // Ensure all lights are off at the end
+  neonAllOff();
+  Serial.println("Neon pattern complete");
+}
+
+// Compatibility aliases
+void turnOnAllNeon() {
+  neonAllOn();
+}
+
+void turnOffAllNeon() {
+  neonAllOff();
 }

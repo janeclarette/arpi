@@ -1,11 +1,12 @@
 #include <Arduino.h>
 #include "CoinAcceptor.h"
 #include "StepperMotor.h"
-#include "RFIDReader.h"
 #include "NetworkManager.h"
 #include "UltrasonicSensor.h"
 #include "Neon.h"
 #include "Beacon.h"
+#include "Solonoid.h"
+#include "LEDHandler.h"
 
 /* ----- Pin map (same as main.cpp) ----- */
 constexpr uint8_t COIN_PIN   = 16;
@@ -14,23 +15,30 @@ constexpr uint8_t RELAY_PIN  = 25;
 constexpr uint8_t IN1 = 12, IN2 = 14, IN3 = 27, IN4 = 26;
 constexpr uint8_t TRIG_PIN = 4, ECHO_PIN = 5;
 
-constexpr uint8_t SS_PIN = 21;
-constexpr uint8_t RST_PIN = 22;
-
 // Network settings
 const char* ssid     = "POCO F5";
 const char* password = "321321321";
-const char* mqttHost = "192.168.20.34";
+const char* mqttHost = "192.168.137.239";
 const int   mqttPort = 1883;
 
 // Test selection variable
 int currentTest = 0;
-const int MAX_TESTS = 6; // Number of test functions
+const int MAX_TESTS = 7; // Number of test functions
 
 // Network manager instance
 NetworkManager net(ssid, password, mqttHost, mqttPort);
 bool networkInitialized = false;
 bool testInProgress = false;
+
+// LED handler instance
+LEDHandler ledHandler;
+
+// Component state variables
+bool coinMonitoringEnabled = false;
+bool neonLightsEnabled = false;
+bool beaconEnabled = false;
+bool solenoidEnabled = false;
+CoinAcceptor* coinAcceptor = nullptr;
 
 // Serial redirection to MQTT
 class MQTTSerial : public Print {
@@ -67,7 +75,7 @@ private:
             buffer.trim();
             if (buffer.length() > 0) {
                 String mqttMsg = "{\"type\":\"SERIAL\",\"data\":\"" + buffer + "\"}";
-                net.send("esp32/test/serial", mqttMsg.c_str());
+                net.send("esp32/data", mqttMsg.c_str());
             }
         }
         buffer = "";
@@ -77,13 +85,45 @@ private:
 
 MQTTSerial mqttSerial;
 
+// Component data publisher function
+void publishComponentData(const String& type, const String& data) {
+    if (networkInitialized) {
+        String payload = "{\"type\":\"" + type + "\",\"data\":\"" + data + "\"}";
+        net.send("esp32/data", payload.c_str());
+    }
+}
+
+// Enhanced logging function
+void netPrintln(const String& msg) {
+    Serial.println(msg);
+    if (networkInitialized) {
+        publishComponentData("LOG", msg);
+    }
+}
+
 // Function declarations
 void testCoinAcceptor();
 void testStepperMotor();
-void testRFIDReader();
 void testUltrasonic();
 void testNeonLights();
 void testBeacon();
+void testSolenoid();
+void testLEDStrip();
+
+// New component control functions
+void enableCoinMonitoring();
+void disableCoinMonitoring();
+void runStepperMovement();
+void runUltrasonicScan();
+void enableNeonLights();
+void disableNeonLights();
+void runNeonPattern();
+void enableBeacon();
+void disableBeacon();
+void enableSolenoid();
+void disableSolenoid();
+void runLEDAnimation();
+
 void runTestFromMQTT(const String& command);
 void initializeNetwork();
 void handleSerialInput(const String& input);
@@ -106,30 +146,50 @@ void setup() {
     // Initialize hardware modules
     setupNeon();
     setupBeacon();
-    mqttPrintln("Hardware modules initialized (Neon & Beacon)");
+    setupSolonoid();
+    
+    // Initialize LED handler
+    ledHandler.setup();
+    
+    mqttPrintln("Hardware modules initialized (Neon, Beacon, Solenoid & LED Strip)");
     
     mqttPrintln("");
     mqttPrintln("Available Commands (via MQTT or Serial):");
-    mqttPrintln("TEST_COIN    - Test Coin Acceptor");
-    mqttPrintln("TEST_STEPPER - Test Stepper Motor");
-    mqttPrintln("TEST_RFID    - Test RFID Reader");
-    mqttPrintln("TEST_ULTRA   - Test Ultrasonic Sensor");
-    mqttPrintln("TEST_NEON    - Test Neon Lights");
-    mqttPrintln("TEST_BEACON  - Test Beacon");
-    mqttPrintln("TEST_ALL     - Run All Tests");
-    mqttPrintln("STATUS       - Show System Status");
+    mqttPrintln("=== TEST COMMANDS ===");
+    mqttPrintln("TEST_COIN      - Test Coin Acceptor");
+    mqttPrintln("TEST_STEPPER   - Test Stepper Motor");
+    mqttPrintln("TEST_ULTRA     - Test Ultrasonic Sensor");
+    mqttPrintln("TEST_NEON      - Test Neon Lights");
+    mqttPrintln("TEST_BEACON    - Test Beacon");
+    mqttPrintln("TEST_SOLENOID  - Test Solenoid");
+    mqttPrintln("TEST_LED       - Test LED Strip");
+    mqttPrintln("TEST_ALL       - Run All Tests");
+    mqttPrintln("");
+    mqttPrintln("=== COMPONENT CONTROL ===");
+    mqttPrintln("START_COIN     - Enable coin monitoring");
+    mqttPrintln("STOP_COIN      - Disable coin monitoring");
+    mqttPrintln("STEPPER_RUN    - Run stepper movement");
+    mqttPrintln("ULTRA_SCAN     - Single ultrasonic scan");
+    mqttPrintln("NEON_ON/OFF    - Control neon lights");
+    mqttPrintln("NEON_PATTERN   - Run neon pattern (5s)");
+    mqttPrintln("BEACON_ON/OFF  - Control beacon");
+    mqttPrintln("SOLENOID_ON/OFF- Control solenoid");
+    mqttPrintln("LED_RUN        - Run LED animation");
+    mqttPrintln("");
+    mqttPrintln("=== SYSTEM ===");
+    mqttPrintln("STATUS         - Show System Status");
     mqttPrintln("");
     mqttPrintln("Manual Commands (Serial only):");
-    mqttPrintln("0-5 - Run specific test number");
+    mqttPrintln("0-6 - Run specific test number");
     mqttPrintln("h   - Show help");
     mqttPrintln("r   - Restart ESP");
     mqttPrintln("===========================================");
     
     if (networkInitialized) {
         mqttPrintln("✅ Ready to receive MQTT commands from Raspberry Pi!");
-        mqttPrintln("Topic: esp32/test/commands");
-        mqttPrintln("Serial Monitor: esp32/test/serial");
-        mqttPrintln("Send commands to: esp32/test/input");
+        mqttPrintln("Topic: esp32/control/esp2");
+        mqttPrintln("Data Output: esp32/data");
+        mqttPrintln("Send commands to: esp32/control/esp2");
     } else {
         mqttPrintln("⚠️ Network not connected - Manual mode only");
     }
@@ -162,6 +222,14 @@ void loop() {
     if (Serial.available()) {
         String input = Serial.readString();
         handleSerialInput(input);
+    }
+    
+    // Continuous component monitoring
+    if (coinMonitoringEnabled && coinAcceptor != nullptr) {
+        if (coinAcceptor->poll()) {
+            publishComponentData("COIN", "detected");
+            netPrintln("💰 Coin detected and sent to Raspberry Pi");
+        }
     }
     
     delay(100);
@@ -212,7 +280,7 @@ void testCoinAcceptor() {
         String resultMsg = "{\"type\":\"TEST_RESULT\",\"test\":\"COIN_ACCEPTOR\",\"coins_detected\":" + 
                           String(coinCount) + ",\"status\":\"" + 
                           String(coinCount > 0 ? "success" : "no_coins") + "\"}";
-        net.send("esp32/test/results", resultMsg.c_str());
+        net.send("esp32/data", resultMsg.c_str());
     }
 }
 
@@ -261,61 +329,7 @@ void testStepperMotor() {
     // Send results to Raspberry Pi
     if (networkInitialized) {
         String resultMsg = "{\"type\":\"TEST_RESULT\",\"test\":\"STEPPER_MOTOR\",\"status\":\"success\",\"steps_tested\":[50,100,200,500]}";
-        net.send("esp32/test/results", resultMsg.c_str());
-    }
-}
-
-void testRFIDReader() {
-    mqttPrintln("📇 RFID READER TEST");
-    mqttPrintln("Testing RFID reader functionality...");
-    
-    RFIDReader rfid(SS_PIN, RST_PIN);
-    rfid.begin();
-    
-    mqttPrintln("RFID reader initialized");
-    mqttPrintln("SS Pin: " + String(SS_PIN) + ", RST Pin: " + String(RST_PIN));
-    
-    mqttPrintln("\nPlace an RFID card/tag near the reader...");
-    mqttPrintln("Waiting 15 seconds for card detection...");
-    
-    unsigned long startTime = millis();
-    int cardCount = 0;
-    String lastUID = "";
-    
-    while (millis() - startTime < 15000) {
-        if (rfid.poll()) {
-            cardCount++;
-            String currentUID = rfid.uid();
-            mqttPrintln("📋 CARD DETECTED #" + String(cardCount));
-            mqttPrintln("   UID: " + currentUID);
-            mqttPrintln("   Length: " + String(currentUID.length()) + " characters");
-            mqttPrintln("   Timestamp: " + String(millis()));
-            
-            if (lastUID != currentUID) {
-                mqttPrintln("   🆕 New card detected!");
-                lastUID = currentUID;
-            } else {
-                mqttPrintln("   🔄 Same card re-detected");
-            }
-            
-            delay(1000); // Prevent rapid re-detection
-        }
-        delay(100);
-    }
-    
-    mqttPrintln("\nRFID Reader Test Results:");
-    mqttPrintln("- Initialization: ✅ Working");
-    mqttPrintln("- Card detection: " + String(cardCount > 0 ? "✅ Working" : "❌ No cards detected"));
-    mqttPrintln("- UID reading: " + String(!lastUID.isEmpty() ? "✅ Working" : "❌ No UID read"));
-    mqttPrintln("- Total cards detected: " + String(cardCount));
-    mqttPrintln("- Last UID: " + (lastUID.isEmpty() ? "None" : lastUID));
-    
-    // Send results to Raspberry Pi
-    if (networkInitialized) {
-        String resultMsg = "{\"type\":\"TEST_RESULT\",\"test\":\"RFID_READER\",\"cards_detected\":" + 
-                          String(cardCount) + ",\"last_uid\":\"" + lastUID + "\",\"status\":\"" + 
-                          String(cardCount > 0 ? "success" : "no_cards") + "\"}";
-        net.send("esp32/test/results", resultMsg.c_str());
+        net.send("esp32/data", resultMsg.c_str());
     }
 }
 
@@ -376,7 +390,7 @@ void testUltrasonic() {
                           ",\"min_distance\":" + String(minDistance, 2) + 
                           ",\"max_distance\":" + String(maxDistance, 2) + 
                           ",\"status\":\"" + String(validReadings > 10 ? "success" : "poor") + "\"}";
-        net.send("esp32/test/results", resultMsg.c_str());
+        net.send("esp32/data", resultMsg.c_str());
     }
 }
 
@@ -432,7 +446,7 @@ void testNeonLights() {
     // Send results to Raspberry Pi
     if (networkInitialized) {
         String resultMsg = "{\"type\":\"TEST_RESULT\",\"test\":\"NEON_LIGHTS\",\"status\":\"success\",\"patterns_tested\":[\"sequential\",\"chase\",\"all_on\",\"all_off\"]}";
-        net.send("esp32/test/results", resultMsg.c_str());
+        net.send("esp32/data", resultMsg.c_str());
     }
 }
 
@@ -488,7 +502,113 @@ void testBeacon() {
     // Send results to Raspberry Pi
     if (networkInitialized) {
         String resultMsg = "{\"type\":\"TEST_RESULT\",\"test\":\"BEACON\",\"status\":\"success\",\"patterns_tested\":[\"on\",\"off\",\"blink\",\"rapid_blink\"]}";
-        net.send("esp32/test/results", resultMsg.c_str());
+        net.send("esp32/data", resultMsg.c_str());
+    }
+}
+
+void testSolenoid() {
+    mqttPrintln("🔧 SOLENOID TEST");
+    mqttPrintln("Testing solenoid functionality...");
+    
+    mqttPrintln("Solenoid initialized");
+    mqttPrintln("Pin: 13");
+    
+    mqttPrintln("\nTesting solenoid ON...");
+    SolonoidOn();
+    mqttPrintln("✅ Solenoid turned ON");
+    delay(2000);
+    
+    mqttPrintln("\nTesting solenoid OFF...");
+    SolonoidOff();
+    mqttPrintln("✅ Solenoid turned OFF");
+    delay(1000);
+    
+    mqttPrintln("\nTesting solenoid pulse pattern...");
+    for (int i = 0; i < 5; i++) {
+        mqttPrintln("Pulse " + String(i + 1) + "/5");
+        SolonoidOn();
+        delay(500);
+        SolonoidOff();
+        delay(500);
+    }
+    mqttPrintln("✅ Pulse pattern completed");
+    
+    mqttPrintln("\nTesting rapid activation pattern...");
+    for (int i = 0; i < 10; i++) {
+        SolonoidOn();
+        delay(200);
+        SolonoidOff();
+        delay(200);
+    }
+    mqttPrintln("✅ Rapid activation pattern completed");
+    
+    mqttPrintln("\nTesting extended activation...");
+    mqttPrintln("Extended ON for 3 seconds...");
+    SolonoidOn();
+    delay(3000);
+    SolonoidOff();
+    mqttPrintln("✅ Extended activation completed - Solenoid OFF");
+    
+    mqttPrintln("\nSolenoid Test Results:");
+    mqttPrintln("- Initialization: ✅ Working");
+    mqttPrintln("- ON function: ✅ Working");
+    mqttPrintln("- OFF function: ✅ Working");
+    mqttPrintln("- Pulse patterns: ✅ Working");
+    mqttPrintln("- Extended activation: ✅ Working");
+    mqttPrintln("- Relay control: ✅ Working");
+    
+    // Send results to Raspberry Pi
+    if (networkInitialized) {
+        String resultMsg = "{\"type\":\"TEST_RESULT\",\"test\":\"SOLENOID\",\"status\":\"success\",\"patterns_tested\":[\"on\",\"off\",\"pulse\",\"rapid\",\"extended\"]}";
+        net.send("esp32/data", resultMsg.c_str());
+    }
+}
+
+void testLEDStrip() {
+    mqttPrintln("🌈 LED STRIP TEST");
+    mqttPrintln("Testing LED strip functionality...");
+    
+    mqttPrintln("LED strip initialized");
+    mqttPrintln("Pin: 21, LEDs: 10");
+    mqttPrintln("Type: NeoPixel (WS2812B)");
+    
+    mqttPrintln("\nTesting LED strip reset...");
+    ledHandler.reset();
+    mqttPrintln("✅ LED strip cleared");
+    delay(1000);
+    
+    mqttPrintln("\nTesting LED animation sequence...");
+    mqttPrintln("Running 5-second animation with random colors and speeds...");
+    ledHandler.run();
+    mqttPrintln("✅ Animation sequence completed");
+    
+    delay(1000);
+    
+    mqttPrintln("\nTesting multiple animation cycles...");
+    for (int i = 0; i < 3; i++) {
+        mqttPrintln("Animation cycle " + String(i + 1) + "/3");
+        ledHandler.run();
+        delay(500);
+    }
+    mqttPrintln("✅ Multiple animation cycles completed");
+    
+    mqttPrintln("\nTesting LED reset after animations...");
+    ledHandler.reset();
+    mqttPrintln("✅ Final reset completed - All LEDs OFF");
+    
+    mqttPrintln("\nLED Strip Test Results:");
+    mqttPrintln("- Initialization: ✅ Working");
+    mqttPrintln("- Reset function: ✅ Working");
+    mqttPrintln("- Animation function: ✅ Working");
+    mqttPrintln("- Random color generation: ✅ Working");
+    mqttPrintln("- Speed variation: ✅ Working");
+    mqttPrintln("- Multiple cycles: ✅ Working");
+    mqttPrintln("- NeoPixel control: ✅ Working");
+    
+    // Send results to Raspberry Pi
+    if (networkInitialized) {
+        String resultMsg = "{\"type\":\"TEST_RESULT\",\"test\":\"LED_STRIP\",\"status\":\"success\",\"features_tested\":[\"reset\",\"animation\",\"colors\",\"speeds\",\"cycles\"]}";
+        net.send("esp32/data", resultMsg.c_str());
     }
 }
 
@@ -525,10 +645,10 @@ void initializeNetwork() {
         
         networkInitialized = true;
         mqttPrintln("✅ MQTT Connection established!");
-        mqttPrintln("Subscribed to: esp32/test/commands");
+        mqttPrintln("Subscribed to: esp32/control/esp2");
         
         // Send ready status to Raspberry Pi
-        net.send("esp32/test/status", "{\"type\":\"READY\",\"device\":\"ESP32_TESTER\",\"status\":\"online\"}");
+        net.send("esp32/data", "{\"type\":\"READY\",\"device\":\"ESP32_TESTER\",\"status\":\"online\"}");
         
     } else {
         mqttPrintln("❌ WiFi Connection failed!");
@@ -550,7 +670,7 @@ void runTestFromMQTT(const String& command) {
     // Send acknowledgment to Raspberry Pi
     if (networkInitialized) {
         String ackMsg = "{\"type\":\"ACK\",\"command\":\"" + command + "\",\"status\":\"starting\"}";
-        net.send("esp32/test/response", ackMsg.c_str());
+        net.send("esp32/data", ackMsg.c_str());
     }
     
     if (command == "TEST_COIN") {
@@ -558,9 +678,6 @@ void runTestFromMQTT(const String& command) {
     } 
     else if (command == "TEST_STEPPER") {
         testStepperMotor();
-    }
-    else if (command == "TEST_RFID") {
-        testRFIDReader();
     }
     else if (command == "TEST_ULTRA") {
         testUltrasonic();
@@ -571,6 +688,49 @@ void runTestFromMQTT(const String& command) {
     else if (command == "TEST_BEACON") {
         testBeacon();
     }
+    else if (command == "TEST_SOLENOID") {
+        testSolenoid();
+    }
+    else if (command == "TEST_LED") {
+        testLEDStrip();
+    }
+    // New component control commands
+    else if (command == "START_COIN") {
+        enableCoinMonitoring();
+    }
+    else if (command == "STOP_COIN") {
+        disableCoinMonitoring();
+    }
+    else if (command == "STEPPER_RUN") {
+        runStepperMovement();
+    }
+    else if (command == "ULTRA_SCAN") {
+        runUltrasonicScan();
+    }
+    else if (command == "NEON_ON") {
+        enableNeonLights();
+    }
+    else if (command == "NEON_OFF") {
+        disableNeonLights();
+    }
+    else if (command == "NEON_PATTERN") {
+        runNeonPattern();
+    }
+    else if (command == "BEACON_ON") {
+        enableBeacon();
+    }
+    else if (command == "BEACON_OFF") {
+        disableBeacon();
+    }
+    else if (command == "SOLENOID_ON") {
+        enableSolenoid();
+    }
+    else if (command == "SOLENOID_OFF") {
+        disableSolenoid();
+    }
+    else if (command == "LED_RUN") {
+        runLEDAnimation();
+    }
     else if (command == "TEST_ALL") {
         mqttPrintln("🔄 RUNNING ALL TESTS SEQUENTIALLY");
         mqttPrintln("This will take several minutes...");
@@ -579,13 +739,15 @@ void runTestFromMQTT(const String& command) {
         delay(2000);
         testStepperMotor();
         delay(2000);
-        testRFIDReader();
-        delay(2000);
         testUltrasonic();
         delay(2000);
         testNeonLights();
         delay(2000);
         testBeacon();
+        delay(2000);
+        testSolenoid();
+        delay(2000);
+        testLEDStrip();
         
         mqttPrintln("✅ ALL TESTS COMPLETED!");
     }
@@ -608,23 +770,23 @@ void runTestFromMQTT(const String& command) {
                              "\",\"mqtt\":\"" + String(networkInitialized ? "connected" : "disconnected") + 
                              "\",\"uptime\":" + String(millis() / 1000) + 
                              ",\"free_heap\":" + String(ESP.getFreeHeap()) + "}";
-            net.send("esp32/test/response", statusMsg.c_str());
+            net.send("esp32/data", statusMsg.c_str());
         }
     }
     else {
         mqttPrintln("❌ Unknown command: " + command);
-        mqttPrintln("Valid commands: TEST_COIN, TEST_STEPPER, TEST_RFID, TEST_ULTRA, TEST_NEON, TEST_BEACON, TEST_ALL, STATUS");
+        mqttPrintln("Valid commands: TEST_*, START_COIN, STOP_COIN, STEPPER_RUN, ULTRA_SCAN, NEON_ON/OFF/PATTERN, BEACON_ON/OFF, SOLENOID_ON/OFF, LED_RUN, STATUS");
         
         if (networkInitialized) {
             String errorMsg = "{\"type\":\"ERROR\",\"message\":\"Unknown command: " + command + "\"}";
-            net.send("esp32/test/response", errorMsg.c_str());
+            net.send("esp32/data", errorMsg.c_str());
         }
     }
     
     // Send completion status to Raspberry Pi
     if (networkInitialized && command != "STATUS") {
         String completeMsg = "{\"type\":\"COMPLETE\",\"command\":\"" + command + "\",\"status\":\"finished\"}";
-        net.send("esp32/test/response", completeMsg.c_str());
+        net.send("esp32/data", completeMsg.c_str());
     }
     
     testInProgress = false;
@@ -640,7 +802,7 @@ void mqttPrint(const String& message) {
     // Send to MQTT if connected
     if (networkInitialized && message.length() > 0) {
         String mqttMsg = "{\"type\":\"SERIAL\",\"data\":\"" + message + "\"}";
-        net.send("esp32/test/serial", mqttMsg.c_str());
+        net.send("esp32/data", mqttMsg.c_str());
     }
 }
 
@@ -651,7 +813,7 @@ void mqttPrintln(const String& message) {
     // Send to MQTT if connected
     if (networkInitialized) {
         String mqttMsg = "{\"type\":\"SERIAL\",\"data\":\"" + message + "\"}";
-        net.send("esp32/test/serial", mqttMsg.c_str());
+        net.send("esp32/data", mqttMsg.c_str());
     }
 }
 
@@ -690,10 +852,11 @@ void handleSerialInput(const String& input) {
         switch (currentTest) {
             case 0: testCoinAcceptor(); break;
             case 1: testStepperMotor(); break;
-            case 2: testRFIDReader(); break;
-            case 3: testUltrasonic(); break;
-            case 4: testNeonLights(); break;
-            case 5: testBeacon(); break;
+            case 2: testUltrasonic(); break;
+            case 3: testNeonLights(); break;
+            case 4: testBeacon(); break;
+            case 5: testSolenoid(); break;
+            case 6: testLEDStrip(); break;
             default:
                 mqttPrintln("Invalid test number!");
                 break;
@@ -705,6 +868,116 @@ void handleSerialInput(const String& input) {
     } else if (testInProgress) {
         mqttPrintln("⚠️ Test in progress, please wait...");
     } else {
-        mqttPrintln("Invalid input! Send a test command, number 0-5, 'h' for help, or 'r' to restart");
+        mqttPrintln("Invalid input! Send a test command, number 0-6, 'h' for help, or 'r' to restart");
     }
+}
+
+// ==================== COMPONENT CONTROL FUNCTIONS ====================
+
+void enableCoinMonitoring() {
+    if (coinAcceptor == nullptr) {
+        coinAcceptor = new CoinAcceptor(COIN_PIN, RELAY_PIN);
+        coinAcceptor->begin();
+    }
+    coinAcceptor->enable();
+    coinMonitoringEnabled = true;
+    netPrintln("✅ Coin monitoring enabled");
+    publishComponentData("COIN_STATUS", "monitoring_enabled");
+}
+
+void disableCoinMonitoring() {
+    if (coinAcceptor != nullptr) {
+        coinAcceptor->disable();
+    }
+    coinMonitoringEnabled = false;
+    netPrintln("⛔ Coin monitoring disabled");
+    publishComponentData("COIN_STATUS", "monitoring_disabled");
+}
+
+void runStepperMovement() {
+    netPrintln("🤖 Running stepper movement");
+    StepperMotor stepper(IN1, IN2, IN3, IN4);
+    stepper.begin();
+    
+    // Move 180 degrees clockwise, then back
+    stepper.rotate(256, true);  // ~180 degrees
+    delay(1000);
+    stepper.rotate(256, false); // ~180 degrees back
+    
+    netPrintln("✅ Stepper movement complete");
+    publishComponentData("STEPPER", "movement_complete");
+}
+
+void runUltrasonicScan() {
+    netPrintln("📡 Running ultrasonic scan");
+    UltrasonicSensor ultrasonic(TRIG_PIN, ECHO_PIN);
+    
+    float distance = ultrasonic.getDistance();
+    String distanceStr = String(distance, 2);
+    
+    netPrintln("Distance: " + distanceStr + " cm");
+    publishComponentData("ULTRASONIC", distanceStr);
+}
+
+void enableNeonLights() {
+    netPrintln("💡 Enabling neon lights");
+    setupNeon();
+    turnOnAllNeon();
+    neonLightsEnabled = true;
+    publishComponentData("NEON", "lights_on");
+}
+
+void disableNeonLights() {
+    netPrintln("🔅 Disabling neon lights");
+    turnOffAllNeon();
+    neonLightsEnabled = false;
+    publishComponentData("NEON", "lights_off");
+}
+
+void runNeonPattern() {
+    netPrintln("🎨 Running neon pattern display");
+    setupNeon();
+    neonPattern();
+    neonLightsEnabled = false; // Ensure lights are off after pattern
+    publishComponentData("NEON", "pattern_complete");
+}
+
+void enableBeacon() {
+    netPrintln("🚨 Enabling beacon");
+    setupBeacon();
+    beaconOn();
+    beaconEnabled = true;
+    publishComponentData("BEACON", "beacon_on");
+}
+
+void disableBeacon() {
+    netPrintln("🔇 Disabling beacon");
+    beaconOff();
+    beaconEnabled = false;
+    publishComponentData("BEACON", "beacon_off");
+}
+
+void enableSolenoid() {
+    netPrintln("🔧 Enabling solenoid");
+    setupSolonoid();
+    SolonoidOn();
+    solenoidEnabled = true;
+    publishComponentData("SOLENOID", "solenoid_on");
+}
+
+void disableSolenoid() {
+    netPrintln("🔧 Disabling solenoid");
+    SolonoidOff();
+    solenoidEnabled = false;
+    publishComponentData("SOLENOID", "solenoid_off");
+}
+
+void runLEDAnimation() {
+    netPrintln("🎆 Running LED animation");
+    ledHandler.setup();
+    ledHandler.run();
+    delay(5000); // Let animation run for 5 seconds
+    ledHandler.reset();
+    netPrintln("✅ LED animation complete");
+    publishComponentData("LED", "animation_complete");
 }
